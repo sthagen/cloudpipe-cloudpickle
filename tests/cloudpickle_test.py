@@ -42,7 +42,7 @@ except ImportError:
 import cloudpickle
 from cloudpickle.cloudpickle import _is_dynamic
 from cloudpickle.cloudpickle import _make_empty_cell, cell_set
-from cloudpickle.cloudpickle import _extract_class_dict
+from cloudpickle.cloudpickle import _extract_class_dict, _whichmodule
 
 from .testutils import subprocess_pickle_echo
 from .testutils import assert_run_python_script
@@ -527,6 +527,46 @@ class CloudPickleTest(unittest.TestCase):
 
         finally:
             os.unlink(pickled_func_path)
+
+    def test_dynamic_module_with_unpicklable_builtin(self):
+        # Reproducer of https://github.com/cloudpipe/cloudpickle/issues/316
+        # Some modules such as scipy inject some unpicklable objects into the
+        # __builtins__ module, which appears in every module's __dict__ under
+        # the '__builtins__' key. In such cases, cloudpickle used to fail
+        # when pickling dynamic modules.
+        class UnpickleableObject(object):
+            def __reduce__(self):
+                raise ValueError('Unpicklable object')
+
+        mod = types.ModuleType("mod")
+
+        exec('f = lambda x: abs(x)', mod.__dict__)
+        assert mod.f(-1) == 1
+        assert '__builtins__' in mod.__dict__
+
+        unpicklable_obj = UnpickleableObject()
+        with pytest.raises(ValueError):
+            cloudpickle.dumps(unpicklable_obj)
+
+        # Emulate the behavior of scipy by injecting an unpickleable object
+        # into mod's builtins.
+        # The __builtins__ entry of mod's __dict__ can either be the
+        # __builtins__ module, or the __builtins__ module's __dict__. #316
+        # happens only in the latter case.
+        if isinstance(mod.__dict__['__builtins__'], dict):
+            mod.__dict__['__builtins__']['unpickleable_obj'] = unpicklable_obj
+        elif isinstance(mod.__dict__['__builtins__'], types.ModuleType):
+            mod.__dict__['__builtins__'].unpickleable_obj = unpicklable_obj
+
+        depickled_mod = pickle_depickle(mod, protocol=self.protocol)
+        assert '__builtins__' in depickled_mod.__dict__
+
+        if isinstance(depickled_mod.__dict__['__builtins__'], dict):
+            assert "abs" in depickled_mod.__builtins__
+        elif isinstance(
+                depickled_mod.__dict__['__builtins__'], types.ModuleType):
+            assert hasattr(depickled_mod.__builtins__, "abs")
+        assert depickled_mod.f(-1) == 1
 
     def test_load_dynamic_module_in_grandchild_process(self):
         # Make sure that when loaded, a dynamic module preserves its dynamic
@@ -1048,35 +1088,94 @@ class CloudPickleTest(unittest.TestCase):
 
         self.assertEqual(set(weakset), {depickled1, depickled2})
 
-    def test_faulty_module(self):
-        for module_name in ['_missing_module', None]:
-            class FaultyModule(object):
-                def __getattr__(self, name):
-                    # This throws an exception while looking up within
-                    # pickle.whichmodule or getattr(module, name, None)
-                    raise Exception()
+    def test_non_module_object_passing_whichmodule_test(self):
+        # https://github.com/cloudpipe/cloudpickle/pull/326: cloudpickle should
+        # not try to instrospect non-modules object when trying to discover the
+        # module of a function/class. This happenened because codecov injects
+        # tuples (and not modules) into sys.modules, but type-checks were not
+        # carried out on the entries of sys.modules, causing cloupdickle to
+        # then error in unexpected ways
+        def func(x):
+            return x ** 2
 
-            class Foo(object):
-                __module__ = module_name
+        # Trigger a loop during the execution of whichmodule(func) by
+        # explicitly setting the function's module to None
+        func.__module__ = None
 
-                def foo(self):
+        class NonModuleObject(object):
+            def __getattr__(self, name):
+                # We whitelist func so that a _whichmodule(func, None) call returns
+                # the NonModuleObject instance if a type check on the entries
+                # of sys.modules is not carried out, but manipulating this
+                # instance thinking it really is a module later on in the
+                # pickling process of func errors out
+                if name == 'func':
+                    return func
+                else:
+                    raise AttributeError
+
+        non_module_object = NonModuleObject()
+
+        assert func(2) == 4
+        assert func is non_module_object.func
+
+        # Any manipulation of non_module_object relying on attribute access
+        # will raise an Exception
+        with pytest.raises(AttributeError):
+            _is_dynamic(non_module_object)
+
+        try:
+            sys.modules['NonModuleObject'] = non_module_object
+
+            func_module_name = _whichmodule(func, None)
+            assert func_module_name != 'NonModuleObject'
+            assert func_module_name is None
+
+            depickled_func = pickle_depickle(func, protocol=self.protocol)
+            assert depickled_func(2) == 4
+
+        finally:
+            sys.modules.pop('NonModuleObject')
+
+    def test_unrelated_faulty_module(self):
+        # Check that pickling a dynamically defined function or class does not
+        # fail when introspecting the currently loaded modules in sys.modules
+        # as long as those faulty modules are unrelated to the class or
+        # function we are currently pickling.
+        for base_class in (object, types.ModuleType):
+            for module_name in ['_missing_module', None]:
+                class FaultyModule(base_class):
+                    def __getattr__(self, name):
+                        # This throws an exception while looking up within
+                        # pickle.whichmodule or getattr(module, name, None)
+                        raise Exception()
+
+                class Foo(object):
+                    __module__ = module_name
+
+                    def foo(self):
+                        return "it works!"
+
+                def foo():
                     return "it works!"
 
-            def foo():
-                return "it works!"
+                foo.__module__ = module_name
 
-            foo.__module__ = module_name
+                if base_class is types.ModuleType:  # noqa
+                    faulty_module = FaultyModule('_faulty_module')
+                else:
+                    faulty_module = FaultyModule()
+                sys.modules["_faulty_module"] = faulty_module
 
-            sys.modules["_faulty_module"] = FaultyModule()
-            try:
-                # Test whichmodule in save_global.
-                self.assertEqual(pickle_depickle(Foo()).foo(), "it works!")
+                try:
+                    # Test whichmodule in save_global.
+                    self.assertEqual(pickle_depickle(Foo()).foo(), "it works!")
 
-                # Test whichmodule in save_function.
-                cloned = pickle_depickle(foo, protocol=self.protocol)
-                self.assertEqual(cloned(), "it works!")
-            finally:
-                sys.modules.pop("_faulty_module", None)
+                    # Test whichmodule in save_function.
+                    cloned = pickle_depickle(foo, protocol=self.protocol)
+                    self.assertEqual(cloned(), "it works!")
+                finally:
+                    sys.modules.pop("_faulty_module", None)
 
     def test_dynamic_pytest_module(self):
         # Test case for pull request https://github.com/cloudpipe/cloudpickle/pull/116
@@ -1118,6 +1217,52 @@ class CloudPickleTest(unittest.TestCase):
         func.__qualname__ = '<modifiedlambda>'
         cloned = pickle_depickle(func, protocol=self.protocol)
         self.assertEqual(cloned.__qualname__, func.__qualname__)
+
+    def test_property(self):
+        # Note that the @property decorator only has an effect on new-style
+        # classes.
+        class MyObject(object):
+            _read_only_value = 1
+            _read_write_value = 1
+
+            @property
+            def read_only_value(self):
+                "A read-only attribute"
+                return self._read_only_value
+
+            @property
+            def read_write_value(self):
+                return self._read_write_value
+
+            @read_write_value.setter
+            def read_write_value(self, value):
+                self._read_write_value = value
+
+
+
+        my_object = MyObject()
+
+        assert my_object.read_only_value == 1
+        assert MyObject.read_only_value.__doc__ == "A read-only attribute"
+
+        with pytest.raises(AttributeError):
+            my_object.read_only_value = 2
+        my_object.read_write_value = 2
+
+        depickled_obj = pickle_depickle(my_object)
+
+        assert depickled_obj.read_only_value == 1
+        assert depickled_obj.read_write_value == 2
+
+        # make sure the depickled read_only_value attribute is still read-only
+        with pytest.raises(AttributeError):
+            my_object.read_only_value = 2
+
+        # make sure the depickled read_write_value attribute is writeable
+        depickled_obj.read_write_value = 3
+        assert depickled_obj.read_write_value == 3
+        type(depickled_obj).read_only_value.__doc__ == "A read-only attribute"
+
 
     def test_namedtuple(self):
         MyTuple = collections.namedtuple('MyTuple', ['a', 'b', 'c'])
