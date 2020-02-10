@@ -1,3 +1,8 @@
+1.4.0 (in development)
+======================
+
+**This version requires Python 3.5 or later**
+
 1.3.0
 =====
 
@@ -23,6 +28,13 @@
 - Fix a side effect that would redefine `types.ClassTypes` as `type`
   when importing cloudpickle.
   ([issue #337](https://github.com/cloudpipe/cloudpickle/pull/337))
+
+- Fix a bug affecting subclasses of slotted classes.
+  ([issue #311](https://github.com/cloudpipe/cloudpickle/issues/311))
+
+- Dont pickle the abc cache of dynamically defined classes for Python 3.6-
+  (This was already the case for python3.7+)
+  ([issue #302](https://github.com/cloudpipe/cloudpickle/issues/302))
 
 1.2.2
 =====
