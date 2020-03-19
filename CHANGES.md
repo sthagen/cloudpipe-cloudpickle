@@ -7,6 +7,14 @@
   (follow up on #276)
   ([issue #347](https://github.com/cloudpipe/cloudpickle/issues/347))
 
+- Fix a bug affecting the pickling of dynamic `TypeVar` instances on Python 3.7+,
+  and expand the support for pickling `TypeVar` instances (dynamic or non-dynamic)
+  to Python 3.5-3.6 ([PR #350](https://github.com/cloudpipe/cloudpickle/pull/350))
+
+- Add support for pickling dynamic classes subclassing `typing.Generic`
+  instances on Python 3.7+
+  ([PR #351](https://github.com/cloudpipe/cloudpickle/pull/351))
+
 1.3.0
 =====
 

@@ -20,14 +20,15 @@ import pickle
 import sys
 import types
 import weakref
+import typing
 
 from _pickle import Pickler
 
 from .cloudpickle import (
     _is_dynamic, _extract_code_globals, _BUILTIN_TYPE_NAMES, DEFAULT_PROTOCOL,
-    _find_imported_submodules, _get_cell_contents, _is_global, _builtin_type,
-    Enum, _ensure_tracking,  _make_skeleton_class, _make_skeleton_enum,
-    _extract_class_dict, dynamic_subimport, subimport
+    _find_imported_submodules, _get_cell_contents, _is_importable_by_name, _builtin_type,
+    Enum, _get_or_create_tracker_id,  _make_skeleton_class, _make_skeleton_enum,
+    _extract_class_dict, dynamic_subimport, subimport, _typevar_reduce, _get_bases,
 )
 
 load, loads = _pickle.load, _pickle.loads
@@ -75,14 +76,14 @@ def _class_getnewargs(obj):
     if isinstance(__dict__, property):
         type_kwargs['__dict__'] = __dict__
 
-    return (type(obj), obj.__name__, obj.__bases__, type_kwargs,
-            _ensure_tracking(obj), None)
+    return (type(obj), obj.__name__, _get_bases(obj), type_kwargs,
+            _get_or_create_tracker_id(obj), None)
 
 
 def _enum_getnewargs(obj):
     members = dict((e.name, e.value) for e in obj)
     return (obj.__bases__, obj.__name__, obj.__qualname__, members,
-            obj.__module__, _ensure_tracking(obj), None)
+            obj.__module__, _get_or_create_tracker_id(obj), None)
 
 
 # COLLECTION OF OBJECTS RECONSTRUCTORS
@@ -332,7 +333,7 @@ def _class_reduce(obj):
         return type, (NotImplemented,)
     elif obj in _BUILTIN_TYPE_NAMES:
         return _builtin_type, (_BUILTIN_TYPE_NAMES[obj],)
-    elif not _is_global(obj):
+    elif not _is_importable_by_name(obj):
         return _dynamic_class_reduce(obj)
     return NotImplemented
 
@@ -422,6 +423,7 @@ class CloudPickler(Pickler):
     dispatch[types.MethodType] = _method_reduce
     dispatch[types.MappingProxyType] = _mappingproxy_reduce
     dispatch[weakref.WeakSet] = _weakset_reduce
+    dispatch[typing.TypeVar] = _typevar_reduce
 
     def __init__(self, file, protocol=None, buffer_callback=None):
         if protocol is None:
@@ -503,7 +505,7 @@ class CloudPickler(Pickler):
         As opposed to cloudpickle.py, There no special handling for builtin
         pypy functions because cloudpickle_fast is CPython-specific.
         """
-        if _is_global(obj):
+        if _is_importable_by_name(obj):
             return NotImplemented
         else:
             return self._dynamic_function_reduce(obj)

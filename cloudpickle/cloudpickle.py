@@ -45,7 +45,6 @@ from __future__ import print_function
 import abc
 import builtins
 import dis
-from functools import partial
 import io
 import itertools
 import logging
@@ -55,11 +54,11 @@ import pickle
 import platform
 import struct
 import sys
-import traceback
 import types
 import weakref
 import uuid
 import threading
+import typing
 from enum import Enum
 
 from pickle import _Pickler as Pickler
@@ -90,7 +89,7 @@ if PYPY:
 _extract_code_globals_cache = weakref.WeakKeyDictionary()
 
 
-def _ensure_tracking(class_def):
+def _get_or_create_tracker_id(class_def):
     with _DYNAMIC_CLASS_TRACKER_LOCK:
         class_tracker_id = _DYNAMIC_CLASS_TRACKER_BY_CLASS.get(class_def)
         if class_tracker_id is None:
@@ -118,7 +117,7 @@ def _whichmodule(obj, name):
     - Errors arising during module introspection are ignored, as those errors
       are considered unwanted side effects.
     """
-    module_name = getattr(obj, '__module__', None)
+    module_name = _get_module_attr(obj)
     if module_name is not None:
         return module_name
     # Protect the iteration by using a copy of sys.modules against dynamic
@@ -141,11 +140,35 @@ def _whichmodule(obj, name):
     return None
 
 
-def _is_global(obj, name=None):
+if sys.version_info[:2] < (3, 7):  # pragma: no branch
+    # Workaround bug in old Python versions: prior to Python 3.7, T.__module__
+    # would always be set to "typing" even when the TypeVar T would be defined
+    # in a different module.
+    #
+    # For such older Python versions, we ignore the __module__ attribute of
+    # TypeVar instances and instead exhaustively lookup those instances in all
+    # currently imported modules via the _whichmodule function.
+    def _get_module_attr(obj):
+        if isinstance(obj, typing.TypeVar):
+            return None
+        return getattr(obj, '__module__', None)
+else:
+    def _get_module_attr(obj):
+        return getattr(obj, '__module__', None)
+
+
+def _is_importable_by_name(obj, name=None):
     """Determine if obj can be pickled as attribute of a file-backed module"""
+    return _lookup_module_and_qualname(obj, name=name) is not None
+
+
+def _lookup_module_and_qualname(obj, name=None):
     if name is None:
         name = getattr(obj, '__qualname__', None)
-    if name is None:
+    if name is None:  # pragma: no cover
+        # This used to be needed for Python 2.7 support but is probably not
+        # needed anymore. However we keep the __name__ introspection in case
+        # users of cloudpickle rely on this old behavior for unknown reasons.
         name = getattr(obj, '__name__', None)
 
     module_name = _whichmodule(obj, name)
@@ -153,10 +176,10 @@ def _is_global(obj, name=None):
     if module_name is None:
         # In this case, obj.__module__ is None AND obj was not found in any
         # imported module. obj is thus treated as dynamic.
-        return False
+        return None
 
     if module_name == "__main__":
-        return False
+        return None
 
     module = sys.modules.get(module_name, None)
     if module is None:
@@ -165,18 +188,20 @@ def _is_global(obj, name=None):
         # types.ModuleType. The other possibility is that module was removed
         # from sys.modules after obj was created/imported. But this case is not
         # supported, as the standard pickle does not support it either.
-        return False
+        return None
 
     # module has been added to sys.modules, but it can still be dynamic.
     if _is_dynamic(module):
-        return False
+        return None
 
     try:
         obj2, parent = _getattribute(module, name)
     except AttributeError:
         # obj was not found inside the module it points to
-        return False
-    return obj2 is obj
+        return None
+    if obj2 is not obj:
+        return None
+    return module, name
 
 
 def _extract_code_globals(co):
@@ -420,6 +445,11 @@ class CloudPickler(Pickler):
             else:
                 raise
 
+    def save_typevar(self, obj):
+        self.save_reduce(*_typevar_reduce(obj), obj=obj)
+
+    dispatch[typing.TypeVar] = save_typevar
+
     def save_memoryview(self, obj):
         self.save(obj.tobytes())
 
@@ -469,7 +499,7 @@ class CloudPickler(Pickler):
         Determines what kind of function obj is (e.g. lambda, defined at
         interactive prompt, etc) and handles the pickling appropriately.
         """
-        if _is_global(obj, name=name):
+        if _is_importable_by_name(obj, name=name):
             return Pickler.save_global(self, obj, name=name)
         elif PYPY and isinstance(obj.__code__, builtin_code_type):
             return self.save_pypy_builtin_func(obj)
@@ -514,7 +544,7 @@ class CloudPickler(Pickler):
         self.save_reduce(
                 _make_skeleton_enum,
                 (obj.__bases__, obj.__name__, obj.__qualname__,
-                 members, obj.__module__, _ensure_tracking(obj), None),
+                 members, obj.__module__, _get_or_create_tracker_id(obj), None),
                 obj=obj
          )
 
@@ -615,8 +645,8 @@ class CloudPickler(Pickler):
             # "Regular" class definition:
             tp = type(obj)
             self.save_reduce(_make_skeleton_class,
-                             (tp, obj.__name__, obj.__bases__, type_kwargs,
-                              _ensure_tracking(obj), None),
+                             (tp, obj.__name__, _get_bases(obj), type_kwargs,
+                              _get_or_create_tracker_id(obj), None),
                              obj=obj)
 
         # Now save the rest of obj's __dict__. Any references to obj
@@ -772,7 +802,7 @@ class CloudPickler(Pickler):
                 _builtin_type, (_BUILTIN_TYPE_NAMES[obj],), obj=obj)
         elif name is not None:
             Pickler.save_global(self, obj, name=name)
-        elif not _is_global(obj, name=name):
+        elif not _is_importable_by_name(obj, name=name):
             self.save_dynamic_class(obj)
         else:
             Pickler.save_global(self, obj, name=name)
@@ -1133,7 +1163,10 @@ def _make_skeleton_class(type_constructor, name, bases, type_kwargs,
     The "extra" variable is meant to be a dict (or None) that can be used for
     forward compatibility shall the need arise.
     """
-    skeleton_class = type_constructor(name, bases, type_kwargs)
+    skeleton_class = types.new_class(
+        name, bases, {'metaclass': type_constructor},
+        lambda ns: ns.update(type_kwargs)
+    )
     return _lookup_class_or_track(class_tracker_id, skeleton_class)
 
 
@@ -1216,3 +1249,38 @@ def _is_dynamic(module):
     else:
         pkgpath = None
     return _find_spec(module.__name__, pkgpath, module) is None
+
+
+def _make_typevar(name, bound, constraints, covariant, contravariant,
+                  class_tracker_id):
+    tv = typing.TypeVar(
+        name, *constraints, bound=bound,
+        covariant=covariant, contravariant=contravariant
+    )
+    return _lookup_class_or_track(class_tracker_id, tv)
+
+
+def _decompose_typevar(obj):
+    return (
+        obj.__name__, obj.__bound__, obj.__constraints__,
+        obj.__covariant__, obj.__contravariant__,
+        _get_or_create_tracker_id(obj),
+    )
+
+
+def _typevar_reduce(obj):
+    # TypeVar instances have no __qualname__ hence we pass the name explicitly.
+    module_and_name = _lookup_module_and_qualname(obj, name=obj.__name__)
+    if module_and_name is None:
+        return (_make_typevar, _decompose_typevar(obj))
+    return (getattr, module_and_name)
+
+
+def _get_bases(typ):
+    if hasattr(typ, '__orig_bases__'):
+        # For generic types (see PEP 560)
+        bases_attr = '__orig_bases__'
+    else:
+        # For regular class objects
+        bases_attr = '__bases__'
+    return getattr(typ, bases_attr)
