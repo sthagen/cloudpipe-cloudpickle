@@ -1,7 +1,27 @@
-1.4.0 (in development)
+1.5.0 (in development)
 ======================
 
+
+1.4.1
+=====
+
+- Fix incompatibilities between cloudpickle 1.4.0 and Python 3.5.0/1/2
+  introduced by the new support of cloudpickle for pickling typing constructs.
+  ([issue #360](https://github.com/cloudpipe/cloudpickle/issues/360))
+
+- Restore compat with loading dynamic classes pickled with cloudpickle
+  version 1.2.1 that would reference the `types.ClassType` attribute.
+  ([PR #359](https://github.com/cloudpipe/cloudpickle/pull/359))
+
+
+1.4.0
+=====
+
 **This version requires Python 3.5 or later**
+
+- cloudpickle can now all pickle all constructs from the ``typing`` module
+  and the ``typing_extensions`` library in Python 3.5+
+  ([PR #318](https://github.com/cloudpipe/cloudpickle/pull/318))
 
 - Stop pickling the annotations of a dynamic class for Python < 3.6
   (follow up on #276)

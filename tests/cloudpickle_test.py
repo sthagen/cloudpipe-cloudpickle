@@ -1787,9 +1787,6 @@ class CloudPickleTest(unittest.TestCase):
 
         self.assertEqual(f2.__doc__, f.__doc__)
 
-    @unittest.skipIf(sys.version_info < (3, 7),
-                     "Pickling type annotations isn't supported for py36 and "
-                     "below.")
     def test_wraps_preserves_function_annotations(self):
         def f(x):
             pass
@@ -1804,79 +1801,7 @@ class CloudPickleTest(unittest.TestCase):
 
         self.assertEqual(f2.__annotations__, f.__annotations__)
 
-    @unittest.skipIf(sys.version_info >= (3, 7),
-                     "pickling annotations is supported starting Python 3.7")
-    def test_function_annotations_silent_dropping(self):
-        # Because of limitations of typing module, cloudpickle does not pickle
-        # the type annotations of a dynamic function or class for Python < 3.7
-
-        class UnpicklableAnnotation:
-            # Mock Annotation metaclass that errors out loudly if we try to
-            # pickle one of its instances
-            def __reduce__(self):
-                raise Exception("not picklable")
-
-        unpickleable_annotation = UnpicklableAnnotation()
-
-        def f(a: unpickleable_annotation):
-            return a
-
-        with pytest.raises(Exception):
-            cloudpickle.dumps(f.__annotations__)
-
-        depickled_f = pickle_depickle(f, protocol=self.protocol)
-        assert depickled_f.__annotations__ == {}
-
-    @unittest.skipIf(sys.version_info >= (3, 7) or sys.version_info < (3, 6),
-                     "pickling annotations is supported starting Python 3.7")
-    def test_class_annotations_silent_dropping(self):
-        # Because of limitations of typing module, cloudpickle does not pickle
-        # the type annotations of a dynamic function or class for Python < 3.7
-
-        # Pickling and unpickling must be done in different processes when
-        # testing dynamic classes (see #313)
-
-        code = '''if 1:
-        import cloudpickle
-        import sys
-
-        class UnpicklableAnnotation:
-            # Mock Annotation metaclass that errors out loudly if we try to
-            # pickle one of its instances
-            def __reduce__(self):
-                raise Exception("not picklable")
-
-        unpickleable_annotation = UnpicklableAnnotation()
-
-        class A:
-            a: unpickleable_annotation
-
-        try:
-            cloudpickle.dumps(A.__annotations__)
-        except Exception:
-            pass
-        else:
-            raise AssertionError
-
-        sys.stdout.buffer.write(cloudpickle.dumps(A, protocol={protocol}))
-        '''
-        cmd = [sys.executable, '-c', code.format(protocol=self.protocol)]
-        proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
-        proc.wait()
-        out, err = proc.communicate()
-        assert proc.returncode == 0, err
-
-        depickled_a = pickle.loads(out)
-        assert not hasattr(depickled_a, "__annotations__")
-
-    @unittest.skipIf(sys.version_info < (3, 7),
-                     "Pickling type hints isn't supported for py36"
-                     " and below.")
     def test_type_hint(self):
-        # Try to pickle compound typing constructs. This would typically fail
-        # on Python < 3.7 (See #193)
         t = typing.Union[list, int]
         assert pickle_depickle(t) == t
 
@@ -2122,6 +2047,9 @@ class CloudPickleTest(unittest.TestCase):
         for attr in attr_list:
             assert getattr(T, attr) == getattr(depickled_T, attr)
 
+    @pytest.mark.skipif(
+        sys.version_info[:3] == (3, 5, 3),
+        reason="TypeVar instances are not weakref-able in Python 3.5.3")
     def test_pickle_dynamic_typevar_tracking(self):
         T = typing.TypeVar("T")
         T2 = subprocess_pickle_echo(T, protocol=self.protocol)
@@ -2142,8 +2070,6 @@ class CloudPickleTest(unittest.TestCase):
         from typing import AnyStr
         assert AnyStr is pickle_depickle(AnyStr, protocol=self.protocol)
 
-    @unittest.skipIf(sys.version_info < (3, 7),
-                     "Pickling generics not supported below py37")
     def test_generic_type(self):
         T = typing.TypeVar('T')
 
@@ -2151,51 +2077,107 @@ class CloudPickleTest(unittest.TestCase):
             pass
 
         assert pickle_depickle(C, protocol=self.protocol) is C
-        assert pickle_depickle(C[int], protocol=self.protocol) is C[int]
+
+        # Identity is not part of the typing contract: only test for
+        # equality instead.
+        assert pickle_depickle(C[int], protocol=self.protocol) == C[int]
 
         with subprocess_worker(protocol=self.protocol) as worker:
 
-            def check_generic(generic, origin, type_value):
+            def check_generic(generic, origin, type_value, use_args):
                 assert generic.__origin__ is origin
-                assert len(generic.__args__) == 1
-                assert generic.__args__[0] is type_value
 
-                assert len(origin.__orig_bases__) == 1
-                ob = origin.__orig_bases__[0]
-                assert ob.__origin__ is typing.Generic
+                if sys.version_info >= (3, 5, 3):
+                    assert len(origin.__orig_bases__) == 1
+                    ob = origin.__orig_bases__[0]
+                    assert ob.__origin__ is typing.Generic
+                else:  # Python 3.5.[0-1-2], pragma: no cover
+                    assert len(origin.__bases__) == 1
+                    ob = origin.__bases__[0]
+
+                if use_args:
+                    assert len(generic.__args__) == 1
+                    assert generic.__args__[0] is type_value
+                else:
+                    assert len(generic.__parameters__) == 1
+                    assert generic.__parameters__[0] is type_value
                 assert len(ob.__parameters__) == 1
 
                 return "ok"
 
-            assert check_generic(C[int], C, int) == "ok"
-            assert worker.run(check_generic, C[int], C, int) == "ok"
+            # backward-compat for old Python 3.5 versions that sometimes relies
+            # on __parameters__
+            use_args = getattr(C[int], '__args__', ()) != ()
+            assert check_generic(C[int], C, int, use_args) == "ok"
+            assert worker.run(check_generic, C[int], C, int, use_args) == "ok"
 
-    @unittest.skipIf(sys.version_info < (3, 7),
-                     "Pickling type hints not supported below py37")
     def test_locally_defined_class_with_type_hints(self):
         with subprocess_worker(protocol=self.protocol) as worker:
             for type_ in _all_types_to_test():
-                # The type annotation syntax causes a SyntaxError on Python 3.5
-                code = textwrap.dedent("""\
                 class MyClass:
-                    attribute: type_
-
                     def method(self, arg: type_) -> type_:
                         return arg
-                """)
-                ns = {"type_": type_}
-                exec(code, ns)
-                MyClass = ns["MyClass"]
+                MyClass.__annotations__ = {'attribute': type_}
 
                 def check_annotations(obj, expected_type):
-                    assert obj.__annotations__["attribute"] is expected_type
-                    assert obj.method.__annotations__["arg"] is expected_type
-                    assert obj.method.__annotations__["return"] is expected_type
+                    assert obj.__annotations__["attribute"] == expected_type
+                    assert obj.method.__annotations__["arg"] == expected_type
+                    assert (
+                        obj.method.__annotations__["return"] == expected_type
+                    )
                     return "ok"
 
                 obj = MyClass()
                 assert check_annotations(obj, type_) == "ok"
                 assert worker.run(check_annotations, obj, type_) == "ok"
+
+    def test_generic_extensions_literal(self):
+        typing_extensions = pytest.importorskip('typing_extensions')
+
+        def check_literal_equal(obj1, obj2):
+            assert obj1.__values__ == obj2.__values__
+            assert type(obj1) == type(obj2) == typing_extensions._LiteralMeta
+        literal_objs = [
+            typing_extensions.Literal, typing_extensions.Literal['a']
+        ]
+        for obj in literal_objs:
+            depickled_obj = pickle_depickle(obj, protocol=self.protocol)
+            if sys.version_info[:3] >= (3, 5, 3):
+                assert depickled_obj == obj
+            else:
+                # __eq__ does not work for Literal objects in early Python 3.5
+                check_literal_equal(obj, depickled_obj)
+
+    def test_generic_extensions_final(self):
+        typing_extensions = pytest.importorskip('typing_extensions')
+
+        def check_final_equal(obj1, obj2):
+            assert obj1.__type__ == obj2.__type__
+            assert type(obj1) == type(obj2) == typing_extensions._FinalMeta
+        final_objs = [typing_extensions.Final, typing_extensions.Final[int]]
+
+        for obj in final_objs:
+            depickled_obj = pickle_depickle(obj, protocol=self.protocol)
+            if sys.version_info[:3] >= (3, 5, 3):
+                assert depickled_obj == obj
+            else:
+                # __eq__ does not work for Final objects in early Python 3.5
+                check_final_equal(obj, depickled_obj)
+
+    def test_class_annotations(self):
+        class C:
+            pass
+        C.__annotations__ = {'a': int}
+
+        C1 = pickle_depickle(C, protocol=self.protocol)
+        assert C1.__annotations__ == C.__annotations__
+
+    def test_function_annotations(self):
+        def f(a: int) -> str:
+            pass
+
+        f1 = pickle_depickle(f, protocol=self.protocol)
+        assert f1.__annotations__ == f.__annotations__
 
 
 class Protocol2CloudPickleTest(CloudPickleTest):
@@ -2234,10 +2216,10 @@ def _all_types_to_test():
     class C(typing.Generic[T]):
         pass
 
-    return [
+    types_to_test = [
         C, C[int],
-        T, typing.Any, typing.NoReturn, typing.Optional,
-        typing.Generic, typing.Union, typing.ClassVar,
+        T, typing.Any, typing.Optional,
+        typing.Generic, typing.Union,
         typing.Optional[int],
         typing.Generic[T],
         typing.Callable[[int], typing.Any],
@@ -2245,10 +2227,15 @@ def _all_types_to_test():
         typing.Callable[[], typing.Any],
         typing.Tuple[int, ...],
         typing.Tuple[int, C[int]],
-        typing.ClassVar[C[int]],
         typing.List[int],
         typing.Dict[int, str],
     ]
+    if sys.version_info[:3] >= (3, 5, 3):
+        types_to_test.append(typing.ClassVar)
+        types_to_test.append(typing.ClassVar[C[int]])
+    if sys.version_info >= (3, 5, 4):
+        types_to_test.append(typing.NoReturn)
+    return types_to_test
 
 
 if __name__ == '__main__':
