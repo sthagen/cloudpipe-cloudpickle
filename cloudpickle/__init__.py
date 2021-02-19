@@ -1,11 +1,11 @@
 from __future__ import absolute_import
 
-import sys
-import pickle
 
+from cloudpickle.cloudpickle import *  # noqa
+from cloudpickle.cloudpickle_fast import CloudPickler, dumps, dump  # noqa
 
-from cloudpickle.cloudpickle import *
-if sys.version_info[:2] >= (3, 8):
-    from cloudpickle.cloudpickle_fast import CloudPickler, dumps, dump
+# Conform to the convention used by python serialization libraries, which
+# expose their Pickler subclass at top-level under the  "Pickler" name.
+Pickler = CloudPickler
 
-__version__ = '1.5.0dev0'
+__version__ = '1.7.0dev0'

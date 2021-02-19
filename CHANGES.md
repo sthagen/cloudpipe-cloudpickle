@@ -1,5 +1,35 @@
-1.5.0 (in development)
+1.7.0 (in development)
 ======================
+
+
+1.6.0
+=====
+
+- `cloudpickle`'s pickle.Pickler subclass (currently defined as
+  `cloudpickle.cloudpickle_fast.CloudPickler`) can and should now be accessed
+  as `cloudpickle.Pickler`. This is the only officially supported way of
+  accessing it.
+  ([issue #366](https://github.com/cloudpipe/cloudpickle/issues/366))
+
+- `cloudpickle` now supports pickling `dict_keys`, `dict_items` and
+  `dict_values`.
+  ([PR #384](https://github.com/cloudpipe/cloudpickle/pull/384))
+
+
+1.5.0
+=====
+
+- Fix a bug causing cloudpickle to crash when pickling dynamically created,
+  importable modules.
+  ([issue #360](https://github.com/cloudpipe/cloudpickle/issues/354))
+
+- Add optional dependency on `pickle5` to get improved performance on
+  Python 3.6 and 3.7.
+  ([PR #370](https://github.com/cloudpipe/cloudpickle/pull/370))
+
+- Internal refactoring to ease the use of `pickle5` in cloudpickle
+  for Python 3.6 and 3.7.
+  ([PR #368](https://github.com/cloudpipe/cloudpickle/pull/368))
 
 
 1.4.1

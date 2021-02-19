@@ -4,7 +4,7 @@ import os.path as op
 import tempfile
 import base64
 from subprocess import Popen, check_output, PIPE, STDOUT, CalledProcessError
-from pickle import loads
+from cloudpickle.compat import pickle
 from contextlib import contextmanager
 from concurrent.futures import ProcessPoolExecutor
 
@@ -12,6 +12,7 @@ import psutil
 from cloudpickle import dumps
 from subprocess import TimeoutExpired
 
+loads = pickle.loads
 TIMEOUT = 60
 TEST_GLOBALS = "a test value"
 
@@ -67,11 +68,11 @@ def subprocess_pickle_echo(input_data, protocol=None, timeout=TIMEOUT):
             message += err.decode('utf-8')
             raise RuntimeError(message)
         return loads(out)
-    except TimeoutExpired:
+    except TimeoutExpired as e:
         proc.kill()
         out, err = proc.communicate()
         message = u"\n".join([out.decode('utf-8'), err.decode('utf-8')])
-        raise RuntimeError(message)
+        raise RuntimeError(message) from e
 
 
 def _read_all_bytes(stream_in, chunk_size=4096):
@@ -183,12 +184,12 @@ def assert_run_python_script(source_code, timeout=TIMEOUT):
                 out = check_output(cmd, **kwargs)
             except CalledProcessError as e:
                 raise RuntimeError(u"script errored with output:\n%s"
-                                   % e.output.decode('utf-8'))
+                                   % e.output.decode('utf-8')) from e
             if out != b"":
                 raise AssertionError(out.decode('utf-8'))
         except TimeoutExpired as e:
             raise RuntimeError(u"script timeout, output so far:\n%s"
-                               % e.output.decode('utf-8'))
+                               % e.output.decode('utf-8')) from e
     finally:
         os.unlink(source_file)
 
