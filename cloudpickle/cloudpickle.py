@@ -55,6 +55,7 @@ import typing
 import warnings
 
 from .compat import pickle
+from collections import OrderedDict
 from typing import Generic, Union, Tuple, Callable
 from pickle import _getattribute
 from importlib._bootstrap import _find_spec
@@ -236,7 +237,10 @@ def _extract_code_globals(co):
     out_names = _extract_code_globals_cache.get(co)
     if out_names is None:
         names = co.co_names
-        out_names = {names[oparg] for _, oparg in _walk_global_ops(co)}
+        # We use a dict with None values instead of a set to get a
+        # deterministic order (assuming Python 3.6+) and avoid introducing
+        # non-deterministic pickle bytes as a results.
+        out_names = {names[oparg]: None for _, oparg in _walk_global_ops(co)}
 
         # Declaring a function inside another one using the "def ..."
         # syntax generates a constant code object corresponding to the one
@@ -247,7 +251,7 @@ def _extract_code_globals(co):
         if co.co_consts:
             for const in co.co_consts:
                 if isinstance(const, types.CodeType):
-                    out_names |= _extract_code_globals(const)
+                    out_names.update(_extract_code_globals(const))
 
         _extract_code_globals_cache[co] = out_names
 
@@ -455,15 +459,31 @@ def _extract_class_dict(cls):
 
 if sys.version_info[:2] < (3, 7):  # pragma: no branch
     def _is_parametrized_type_hint(obj):
-        # This is very cheap but might generate false positives.
+        # This is very cheap but might generate false positives. So try to
+        # narrow it down is good as possible.
+        type_module = getattr(type(obj), '__module__', None)
+        from_typing_extensions = type_module == 'typing_extensions'
+        from_typing = type_module == 'typing'
+
         # general typing Constructs
         is_typing = getattr(obj, '__origin__', None) is not None
 
         # typing_extensions.Literal
-        is_literal = getattr(obj, '__values__', None) is not None
+        is_literal = (
+            (getattr(obj, '__values__', None) is not None)
+            and from_typing_extensions
+        )
 
         # typing_extensions.Final
-        is_final = getattr(obj, '__type__', None) is not None
+        is_final = (
+            (getattr(obj, '__type__', None) is not None)
+            and from_typing_extensions
+        )
+
+        # typing.ClassVar
+        is_classvar = (
+            (getattr(obj, '__type__', None) is not None) and from_typing
+        )
 
         # typing.Union/Tuple for old Python 3.5
         is_union = getattr(obj, '__union_params__', None) is not None
@@ -472,8 +492,8 @@ if sys.version_info[:2] < (3, 7):  # pragma: no branch
             getattr(obj, '__result__', None) is not None and
             getattr(obj, '__args__', None) is not None
         )
-        return any((is_typing, is_literal, is_final, is_union, is_tuple,
-                    is_callable))
+        return any((is_typing, is_literal, is_final, is_classvar, is_union,
+                    is_tuple, is_callable))
 
     def _create_parametrized_type_hint(origin, args):
         return origin[args]
@@ -836,13 +856,22 @@ def _get_bases(typ):
     return getattr(typ, bases_attr)
 
 
-def _make_dict_keys(obj):
-    return dict.fromkeys(obj).keys()
+def _make_dict_keys(obj, is_ordered=False):
+    if is_ordered:
+        return OrderedDict.fromkeys(obj).keys()
+    else:
+        return dict.fromkeys(obj).keys()
 
 
-def _make_dict_values(obj):
-    return {i: _ for i, _ in enumerate(obj)}.values()
+def _make_dict_values(obj, is_ordered=False):
+    if is_ordered:
+        return OrderedDict((i, _) for i, _ in enumerate(obj)).values()
+    else:
+        return {i: _ for i, _ in enumerate(obj)}.values()
 
 
-def _make_dict_items(obj):
-    return obj.items()
+def _make_dict_items(obj, is_ordered=False):
+    if is_ordered:
+        return OrderedDict(obj).items()
+    else:
+        return obj.items()
