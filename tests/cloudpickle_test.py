@@ -1,5 +1,3 @@
-from __future__ import division
-
 import _collections_abc
 import abc
 import collections
@@ -13,6 +11,7 @@ from operator import itemgetter, attrgetter
 import pickletools
 import platform
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -45,7 +44,10 @@ except ImportError:
 
 import cloudpickle
 from cloudpickle.compat import pickle
-from cloudpickle.cloudpickle import _is_importable
+from cloudpickle import register_pickle_by_value
+from cloudpickle import unregister_pickle_by_value
+from cloudpickle import list_registry_pickle_by_value
+from cloudpickle.cloudpickle import _should_pickle_by_reference
 from cloudpickle.cloudpickle import _make_empty_cell, cell_set
 from cloudpickle.cloudpickle import _extract_class_dict, _whichmodule
 from cloudpickle.cloudpickle import _lookup_module_and_qualname
@@ -62,7 +64,7 @@ _TEST_GLOBAL_VARIABLE = "default_value"
 _TEST_GLOBAL_VARIABLE2 = "another_value"
 
 
-class RaiserOnPickle(object):
+class RaiserOnPickle:
 
     def __init__(self, exc):
         self.exc = exc
@@ -81,6 +83,14 @@ def pickle_depickle(obj, protocol=cloudpickle.DEFAULT_PROTOCOL):
 def _escape(raw_filepath):
     # Ugly hack to embed filepaths in code templates for windows
     return raw_filepath.replace("\\", r"\\\\")
+
+
+def _maybe_remove(list_, item):
+    try:
+        list_.remove(item)
+    except ValueError:
+        pass
+    return list_
 
 
 def test_extract_class_dict():
@@ -153,7 +163,7 @@ class CloudPickleTest(unittest.TestCase):
         self.assertEqual(getter(d), getter2(d))
 
     def test_attrgetter(self):
-        class C(object):
+        class C:
             def __getattr__(self, item):
                 return item
         d = C()
@@ -179,7 +189,7 @@ class CloudPickleTest(unittest.TestCase):
         self.assertEqual(out1, out2)
 
     def test_func_globals(self):
-        class Unpicklable(object):
+        class Unpicklable:
             def __reduce__(self):
                 raise Exception("not picklable")
 
@@ -333,14 +343,14 @@ class CloudPickleTest(unittest.TestCase):
 
     def test_dynamically_generated_class_that_uses_super(self):
 
-        class Base(object):
+        class Base:
             def method(self):
                 return 1
 
         class Derived(Base):
             "Derived Docstring"
             def method(self):
-                return super(Derived, self).method() + 1
+                return super().method() + 1
 
         self.assertEqual(Derived().method(), 2)
 
@@ -359,7 +369,7 @@ class CloudPickleTest(unittest.TestCase):
 
     def test_cycle_in_classdict_globals(self):
 
-        class C(object):
+        class C:
 
             def it_works(self):
                 return "woohoo!"
@@ -390,7 +400,7 @@ class CloudPickleTest(unittest.TestCase):
 
         hidden_constant = lambda: LOCAL_CONSTANT
 
-        class SomeClass(object):
+        class SomeClass:
             """Overly complicated class with nested references to symbols"""
             def __init__(self, value):
                 self.value = value
@@ -473,7 +483,7 @@ class CloudPickleTest(unittest.TestCase):
         assert list(gen2(3)) == list(range(3))
 
     def test_classmethod(self):
-        class A(object):
+        class A:
             @staticmethod
             def test_sm():
                 return "sm"
@@ -504,7 +514,7 @@ class CloudPickleTest(unittest.TestCase):
         self.assertEqual(f('abc'), 'ABC')
 
     def test_instancemethods_without_self(self):
-        class F(object):
+        class F:
             def f(self, x):
                 return x + 1
 
@@ -591,7 +601,7 @@ class CloudPickleTest(unittest.TestCase):
         # __builtins__ module, which appears in every module's __dict__ under
         # the '__builtins__' key. In such cases, cloudpickle used to fail
         # when pickling dynamic modules.
-        class UnpickleableObject(object):
+        class UnpickleableObject:
             def __reduce__(self):
                 raise ValueError('Unpicklable object')
 
@@ -732,24 +742,24 @@ class CloudPickleTest(unittest.TestCase):
         import distutils
         import distutils.ccompiler
 
-        assert _is_importable(pickle)
-        assert _is_importable(os.path)  # fake (aliased) module
-        assert _is_importable(distutils)  # package
-        assert _is_importable(distutils.ccompiler)  # module in package
+        assert _should_pickle_by_reference(pickle)
+        assert _should_pickle_by_reference(os.path)  # fake (aliased) module
+        assert _should_pickle_by_reference(distutils)  # package
+        assert _should_pickle_by_reference(distutils.ccompiler)  # module in package
 
         dynamic_module = types.ModuleType('dynamic_module')
-        assert not _is_importable(dynamic_module)
+        assert not _should_pickle_by_reference(dynamic_module)
 
         if platform.python_implementation() == 'PyPy':
             import _codecs
-            assert _is_importable(_codecs)
+            assert _should_pickle_by_reference(_codecs)
 
         # #354: Check that modules created dynamically during the import of
         # their parent modules are considered importable by cloudpickle.
         # See the mod_with_dynamic_submodule documentation for more
         # details of this use case.
         import _cloudpickle_testpkg.mod.dynamic_submodule as m
-        assert _is_importable(m)
+        assert _should_pickle_by_reference(m)
         assert pickle_depickle(m, protocol=self.protocol) is m
 
         # Check for similar behavior for a module that cannot be imported by
@@ -757,14 +767,14 @@ class CloudPickleTest(unittest.TestCase):
         from _cloudpickle_testpkg.mod import dynamic_submodule_two as m2
         # Note: import _cloudpickle_testpkg.mod.dynamic_submodule_two as m2
         # works only for Python 3.7+
-        assert _is_importable(m2)
+        assert _should_pickle_by_reference(m2)
         assert pickle_depickle(m2, protocol=self.protocol) is m2
 
         # Submodule_three is a dynamic module only importable via module lookup
         with pytest.raises(ImportError):
             import _cloudpickle_testpkg.mod.submodule_three  # noqa
         from _cloudpickle_testpkg.mod import submodule_three as m3
-        assert not _is_importable(m3)
+        assert not _should_pickle_by_reference(m3)
 
         # This module cannot be pickled using attribute lookup (as it does not
         # have a `__module__` attribute like classes and functions.
@@ -776,12 +786,12 @@ class CloudPickleTest(unittest.TestCase):
         # Do the same for an importable dynamic submodule inside a dynamic
         # module inside a file-backed module.
         import _cloudpickle_testpkg.mod.dynamic_submodule.dynamic_subsubmodule as sm  # noqa
-        assert _is_importable(sm)
+        assert _should_pickle_by_reference(sm)
         assert pickle_depickle(sm, protocol=self.protocol) is sm
 
         expected = "cannot check importability of object instances"
         with pytest.raises(TypeError, match=expected):
-            _is_importable(object())
+            _should_pickle_by_reference(object())
 
     def test_Ellipsis(self):
         self.assertEqual(Ellipsis,
@@ -814,13 +824,9 @@ class CloudPickleTest(unittest.TestCase):
         # builtin function from a "regular" module
         assert pickle_depickle(mkdir, protocol=self.protocol) is mkdir
 
-    @pytest.mark.skipif(platform.python_implementation() == 'PyPy' and
-                        sys.version_info[:2] == (3, 5),
-                        reason="bug of pypy3.5 in builtin-type constructors")
     def test_builtin_type_constructor(self):
-        # Due to a bug in pypy3.5, cloudpickling builtin-type constructors
-        # fails. This test makes sure that cloudpickling builtin-type
-        # constructors works for all other python versions/implementation.
+        # This test makes sure that cloudpickling builtin-type
+        # constructors works for all python versions/implementation.
 
         # pickle_depickle some builtin methods of the __builtin__ module
         for t in list, tuple, set, frozenset, dict, object:
@@ -1116,7 +1122,7 @@ class CloudPickleTest(unittest.TestCase):
         out, _ = proc.communicate()
         self.assertEqual(proc.wait(), 0)
         self.assertEqual(out.strip().decode(),
-                         'INFO:{}:hello'.format(logger.name))
+                         f'INFO:{logger.name}:hello')
 
     def test_logger(self):
         # logging.RootLogger object
@@ -1235,7 +1241,7 @@ class CloudPickleTest(unittest.TestCase):
         # pickled in a larger data structure that includes other references to
         # their inhabitants.
 
-        class SomeClass(object):
+        class SomeClass:
             def __init__(self, x):
                 self.x = x
 
@@ -1267,7 +1273,7 @@ class CloudPickleTest(unittest.TestCase):
         # explicitly setting the function's module to None
         func.__module__ = None
 
-        class NonModuleObject(object):
+        class NonModuleObject:
             def __ini__(self):
                 self.some_attr = None
 
@@ -1318,7 +1324,7 @@ class CloudPickleTest(unittest.TestCase):
                         # pickle.whichmodule or getattr(module, name, None)
                         raise Exception()
 
-                class Foo(object):
+                class Foo:
                     __module__ = module_name
 
                     def foo(self):
@@ -1385,7 +1391,7 @@ class CloudPickleTest(unittest.TestCase):
     def test_property(self):
         # Note that the @property decorator only has an effect on new-style
         # classes.
-        class MyObject(object):
+        class MyObject:
             _read_only_value = 1
             _read_write_value = 1
 
@@ -1931,7 +1937,7 @@ class CloudPickleTest(unittest.TestCase):
 
     def test_instance_with_slots(self):
         for slots in [["registered_attribute"], "registered_attribute"]:
-            class ClassWithSlots(object):
+            class ClassWithSlots:
                 __slots__ = slots
 
                 def __init__(self):
@@ -2057,11 +2063,11 @@ class CloudPickleTest(unittest.TestCase):
         f, g = relative_imports_factory()
         for func, source in zip([f, g], ["module", "package"]):
             # Make sure relative imports are initially working
-            assert func() == "hello from a {}!".format(source)
+            assert func() == f"hello from a {source}!"
 
             # Make sure relative imports still work after round-tripping
             cloned_func = pickle_depickle(func, protocol=self.protocol)
-            assert cloned_func() == "hello from a {}!".format(source)
+            assert cloned_func() == f"hello from a {source}!"
 
     def test_interactively_defined_func_with_keyword_only_argument(self):
         # fixes https://github.com/cloudpipe/cloudpickle/issues/263
@@ -2160,9 +2166,6 @@ class CloudPickleTest(unittest.TestCase):
         for attr in attr_list:
             assert getattr(T, attr) == getattr(depickled_T, attr)
 
-    @pytest.mark.skipif(
-        sys.version_info[:3] == (3, 5, 3),
-        reason="TypeVar instances are not weakref-able in Python 3.5.3")
     def test_pickle_dynamic_typevar_tracking(self):
         T = typing.TypeVar("T")
         T2 = subprocess_pickle_echo(T, protocol=self.protocol)
@@ -2200,13 +2203,9 @@ class CloudPickleTest(unittest.TestCase):
             def check_generic(generic, origin, type_value, use_args):
                 assert generic.__origin__ is origin
 
-                if sys.version_info >= (3, 5, 3):
-                    assert len(origin.__orig_bases__) == 1
-                    ob = origin.__orig_bases__[0]
-                    assert ob.__origin__ is typing.Generic
-                else:  # Python 3.5.[0-1-2], pragma: no cover
-                    assert len(origin.__bases__) == 1
-                    ob = origin.__bases__[0]
+                assert len(origin.__orig_bases__) == 1
+                ob = origin.__orig_bases__[0]
+                assert ob.__origin__ is typing.Generic
 
                 if use_args:
                     assert len(generic.__args__) == 1
@@ -2267,36 +2266,15 @@ class CloudPickleTest(unittest.TestCase):
 
     def test_generic_extensions_literal(self):
         typing_extensions = pytest.importorskip('typing_extensions')
-
-        def check_literal_equal(obj1, obj2):
-            assert obj1.__values__ == obj2.__values__
-            assert type(obj1) == type(obj2) == typing_extensions._LiteralMeta
-        literal_objs = [
-            typing_extensions.Literal, typing_extensions.Literal['a']
-        ]
-        for obj in literal_objs:
+        for obj in [typing_extensions.Literal, typing_extensions.Literal['a']]:
             depickled_obj = pickle_depickle(obj, protocol=self.protocol)
-            if sys.version_info[:3] >= (3, 5, 3):
-                assert depickled_obj == obj
-            else:
-                # __eq__ does not work for Literal objects in early Python 3.5
-                check_literal_equal(obj, depickled_obj)
+            assert depickled_obj == obj
 
     def test_generic_extensions_final(self):
         typing_extensions = pytest.importorskip('typing_extensions')
-
-        def check_final_equal(obj1, obj2):
-            assert obj1.__type__ == obj2.__type__
-            assert type(obj1) == type(obj2) == typing_extensions._FinalMeta
-        final_objs = [typing_extensions.Final, typing_extensions.Final[int]]
-
-        for obj in final_objs:
+        for obj in [typing_extensions.Final, typing_extensions.Final[int]]:
             depickled_obj = pickle_depickle(obj, protocol=self.protocol)
-            if sys.version_info[:3] >= (3, 5, 3):
-                assert depickled_obj == obj
-            else:
-                # __eq__ does not work for Final objects in early Python 3.5
-                check_final_equal(obj, depickled_obj)
+            assert depickled_obj == obj
 
     def test_class_annotations(self):
         class C:
@@ -2350,6 +2328,227 @@ class CloudPickleTest(unittest.TestCase):
 
         o = MyClass()
         pickle_depickle(o, protocol=self.protocol)
+
+    def test_pickle_constructs_from_module_registered_for_pickling_by_value(self):  # noqa
+        _prev_sys_path = sys.path.copy()
+        try:
+            # We simulate an interactive session that:
+            # - we start from the /path/to/cloudpickle/tests directory, where a
+            #   local .py file (mock_local_file) is located.
+            # - uses constructs from mock_local_file in remote workers that do
+            #   not have access to this file. This situation is
+            #   the justification behind the
+            #   (un)register_pickle_by_value(module) api that cloudpickle
+            #   exposes.
+            _mock_interactive_session_cwd = os.path.dirname(__file__)
+
+            # First, remove sys.path entries that could point to
+            # /path/to/cloudpickle/tests and be in inherited by the worker
+            _maybe_remove(sys.path, '')
+            _maybe_remove(sys.path, _mock_interactive_session_cwd)
+
+            # Add the desired session working directory
+            sys.path.insert(0, _mock_interactive_session_cwd)
+
+            with subprocess_worker(protocol=self.protocol) as w:
+                # Make the module unavailable in the remote worker
+                w.run(
+                    lambda p: sys.path.remove(p), _mock_interactive_session_cwd
+                )
+                # Import the actual file after starting the module since the
+                # worker is started using fork on Linux, which will inherits
+                # the parent sys.modules. On Python>3.6, the worker can be
+                # started using spawn using mp_context in ProcessPoolExectutor.
+                # TODO Once Python 3.6 reaches end of life, rely on mp_context
+                # instead.
+                import mock_local_folder.mod as mod
+                # The constructs whose pickling mechanism is changed using
+                # register_pickle_by_value are functions, classes, TypeVar and
+                # modules.
+                from mock_local_folder.mod import (
+                    local_function, LocalT, LocalClass
+                )
+
+                # Make sure the module/constructs are unimportable in the
+                # worker.
+                with pytest.raises(ImportError):
+                    w.run(lambda: __import__("mock_local_folder.mod"))
+                with pytest.raises(ImportError):
+                    w.run(
+                        lambda: __import__("mock_local_folder.subfolder.mod")
+                    )
+
+                for o in [mod, local_function, LocalT, LocalClass]:
+                    with pytest.raises(ImportError):
+                        w.run(lambda: o)
+
+                register_pickle_by_value(mod)
+                # function
+                assert w.run(lambda: local_function()) == local_function()
+                # typevar
+                assert w.run(lambda: LocalT.__name__) == LocalT.__name__
+                # classes
+                assert (
+                    w.run(lambda: LocalClass().method())
+                    == LocalClass().method()
+                )
+                # modules
+                assert (
+                    w.run(lambda: mod.local_function()) == local_function()
+                )
+
+                # Constructs from modules inside subfolders should be pickled
+                # by value if a namespace module pointing to some parent folder
+                # was registered for pickling by value. A "mock_local_folder"
+                # namespace module falls into that category, but a
+                # "mock_local_folder.mod" one does not.
+                from mock_local_folder.subfolder.submod import (
+                    LocalSubmodClass, LocalSubmodT, local_submod_function
+                )
+                # Shorter aliases to comply with line-length limits
+                _t, _func, _class = (
+                    LocalSubmodT, local_submod_function, LocalSubmodClass
+                )
+                with pytest.raises(ImportError):
+                    w.run(
+                        lambda: __import__("mock_local_folder.subfolder.mod")
+                    )
+                with pytest.raises(ImportError):
+                    w.run(lambda: local_submod_function)
+
+                unregister_pickle_by_value(mod)
+
+                with pytest.raises(ImportError):
+                    w.run(lambda: local_function)
+
+                with pytest.raises(ImportError):
+                    w.run(lambda: __import__("mock_local_folder.mod"))
+
+                # Test the namespace folder case
+                import mock_local_folder
+                register_pickle_by_value(mock_local_folder)
+                assert w.run(lambda: local_function()) == local_function()
+                assert w.run(lambda: _func()) == _func()
+                unregister_pickle_by_value(mock_local_folder)
+
+                with pytest.raises(ImportError):
+                    w.run(lambda: local_function)
+                with pytest.raises(ImportError):
+                    w.run(lambda: local_submod_function)
+
+                # Test the case of registering a single module inside a
+                # subfolder.
+                import mock_local_folder.subfolder.submod
+                register_pickle_by_value(mock_local_folder.subfolder.submod)
+                assert w.run(lambda: _func()) == _func()
+                assert w.run(lambda: _t.__name__) == _t.__name__
+                assert w.run(lambda: _class().method()) == _class().method()
+
+                # Registering a module from a subfolder for pickling by value
+                # should not make constructs from modules from the parent
+                # folder pickleable
+                with pytest.raises(ImportError):
+                    w.run(lambda: local_function)
+                with pytest.raises(ImportError):
+                    w.run(lambda: __import__("mock_local_folder.mod"))
+
+                unregister_pickle_by_value(
+                    mock_local_folder.subfolder.submod
+                )
+                with pytest.raises(ImportError):
+                    w.run(lambda: local_submod_function)
+
+                # Test the subfolder namespace module case
+                import mock_local_folder.subfolder
+                register_pickle_by_value(mock_local_folder.subfolder)
+                assert w.run(lambda: _func()) == _func()
+                assert w.run(lambda: _t.__name__) == _t.__name__
+                assert w.run(lambda: _class().method()) == _class().method()
+
+                unregister_pickle_by_value(mock_local_folder.subfolder)
+        finally:
+            _fname = "mock_local_folder"
+            sys.path = _prev_sys_path
+            for m in [_fname, f"{_fname}.mod", f"{_fname}.subfolder",
+                      f"{_fname}.subfolder.submod"]:
+                mod = sys.modules.pop(m, None)
+                if mod and mod.__name__ in list_registry_pickle_by_value():
+                    unregister_pickle_by_value(mod)
+
+    def test_pickle_constructs_from_installed_packages_registered_for_pickling_by_value(  # noqa
+        self
+    ):
+        for package_or_module in ["package", "module"]:
+            if package_or_module == "package":
+                import _cloudpickle_testpkg as m
+                f = m.package_function_with_global
+                _original_global = m.global_variable
+            elif package_or_module == "module":
+                import _cloudpickle_testpkg.mod as m
+                f = m.module_function_with_global
+                _original_global = m.global_variable
+            try:
+                with subprocess_worker(protocol=self.protocol) as w:
+                    assert w.run(lambda: f()) == _original_global
+
+                    # Test that f is pickled by value by modifying a global
+                    # variable that f uses, and making sure that this
+                    # modification shows up when calling the function remotely
+                    register_pickle_by_value(m)
+                    assert w.run(lambda: f()) == _original_global
+                    m.global_variable = "modified global"
+                    assert m.global_variable != _original_global
+                    assert w.run(lambda: f()) == "modified global"
+                    unregister_pickle_by_value(m)
+            finally:
+                m.global_variable = _original_global
+                if m.__name__ in list_registry_pickle_by_value():
+                    unregister_pickle_by_value(m)
+
+    def test_pickle_various_versions_of_the_same_function_with_different_pickling_method(  # noqa
+        self
+    ):
+        # Make sure that different versions of the same function (possibly
+        # pickled in a different way - by value and/or by reference) can
+        # peacefully co-exist (e.g. without globals interaction) in a remote
+        # worker.
+        import _cloudpickle_testpkg
+        from _cloudpickle_testpkg import package_function_with_global as f
+        _original_global = _cloudpickle_testpkg.global_variable
+
+        def _create_registry():
+            _main = __import__("sys").modules["__main__"]
+            _main._cloudpickle_registry = {}
+            # global _cloudpickle_registry
+
+        def _add_to_registry(v, k):
+            _main = __import__("sys").modules["__main__"]
+            _main._cloudpickle_registry[k] = v
+
+        def _call_from_registry(k):
+            _main = __import__("sys").modules["__main__"]
+            return _main._cloudpickle_registry[k]()
+
+        try:
+            with subprocess_worker(protocol=self.protocol) as w:
+                w.run(_create_registry)
+                w.run(_add_to_registry, f, "f_by_ref")
+
+                register_pickle_by_value(_cloudpickle_testpkg)
+                _cloudpickle_testpkg.global_variable = "modified global"
+                w.run(_add_to_registry, f, "f_by_val")
+                assert (
+                    w.run(_call_from_registry, "f_by_ref") == _original_global
+                )
+                assert (
+                    w.run(_call_from_registry, "f_by_val") == "modified global"
+                )
+
+        finally:
+            _cloudpickle_testpkg.global_variable = _original_global
+
+            if "_cloudpickle_testpkg" in list_registry_pickle_by_value():
+                unregister_pickle_by_value(_cloudpickle_testpkg)
 
     @pytest.mark.skipif(
         sys.version_info < (3, 7),
@@ -2408,6 +2607,45 @@ def test_lookup_module_and_qualname_stdlib_typevar():
     assert name == 'AnyStr'
 
 
+def test_register_pickle_by_value():
+    import _cloudpickle_testpkg as pkg
+    import _cloudpickle_testpkg.mod as mod
+
+    assert list_registry_pickle_by_value() == set()
+
+    register_pickle_by_value(pkg)
+    assert list_registry_pickle_by_value() == {pkg.__name__}
+
+    register_pickle_by_value(mod)
+    assert list_registry_pickle_by_value() == {pkg.__name__, mod.__name__}
+
+    unregister_pickle_by_value(mod)
+    assert list_registry_pickle_by_value() == {pkg.__name__}
+
+    msg = f"Input should be a module object, got {pkg.__name__} instead"
+    with pytest.raises(ValueError, match=msg):
+        unregister_pickle_by_value(pkg.__name__)
+
+    unregister_pickle_by_value(pkg)
+    assert list_registry_pickle_by_value() == set()
+
+    msg = f"{pkg} is not registered for pickle by value"
+    with pytest.raises(ValueError, match=re.escape(msg)):
+        unregister_pickle_by_value(pkg)
+
+    msg = f"Input should be a module object, got {pkg.__name__} instead"
+    with pytest.raises(ValueError, match=msg):
+        register_pickle_by_value(pkg.__name__)
+
+    dynamic_mod = types.ModuleType('dynamic_mod')
+    msg = (
+        f"{dynamic_mod} was not imported correctly, have you used an "
+        f"`import` statement to access it?"
+    )
+    with pytest.raises(ValueError, match=re.escape(msg)):
+        register_pickle_by_value(dynamic_mod)
+
+
 def _all_types_to_test():
     T = typing.TypeVar('T')
 
@@ -2427,12 +2665,10 @@ def _all_types_to_test():
         typing.Tuple[int, C[int]],
         typing.List[int],
         typing.Dict[int, str],
+        typing.ClassVar,
+        typing.ClassVar[C[int]],
+        typing.NoReturn,
     ]
-    if sys.version_info[:3] >= (3, 5, 3):
-        types_to_test.append(typing.ClassVar)
-        types_to_test.append(typing.ClassVar[C[int]])
-    if sys.version_info >= (3, 5, 4):
-        types_to_test.append(typing.NoReturn)
     return types_to_test
 
 

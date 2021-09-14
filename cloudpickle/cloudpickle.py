@@ -40,7 +40,6 @@ LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
-from __future__ import print_function
 
 import builtins
 import dis
@@ -56,7 +55,7 @@ import warnings
 
 from .compat import pickle
 from collections import OrderedDict
-from typing import Generic, Union, Tuple, Callable
+from typing import ClassVar, Generic, Union, Tuple, Callable
 from pickle import _getattribute
 from importlib._bootstrap import _find_spec
 
@@ -65,11 +64,6 @@ try:  # pragma: no branch
     from typing_extensions import Literal, Final
 except ImportError:
     _typing_extensions = Literal = Final = None
-
-if sys.version_info >= (3, 5, 3):
-    from typing import ClassVar
-else:  # pragma: no cover
-    ClassVar = None
 
 if sys.version_info >= (3, 8):
     from types import CellType
@@ -87,6 +81,9 @@ else:
 # communicating processes to run the same Python version hence we favor
 # communication speed over compatibility:
 DEFAULT_PROTOCOL = pickle.HIGHEST_PROTOCOL
+
+# Names of modules whose resources should be treated as dynamic.
+_PICKLE_BY_VALUE_MODULES = set()
 
 # Track the provenance of reconstructed dynamic classes to make it possible to
 # reconstruct instances from the matching singleton class definition when
@@ -122,6 +119,77 @@ def _lookup_class_or_track(class_tracker_id, class_def):
                 class_tracker_id, class_def)
             _DYNAMIC_CLASS_TRACKER_BY_CLASS[class_def] = class_tracker_id
     return class_def
+
+
+def register_pickle_by_value(module):
+    """Register a module to make it functions and classes picklable by value.
+
+    By default, functions and classes that are attributes of an importable
+    module are to be pickled by reference, that is relying on re-importing
+    the attribute from the module at load time.
+
+    If `register_pickle_by_value(module)` is called, all its functions and
+    classes are subsequently to be pickled by value, meaning that they can
+    be loaded in Python processes where the module is not importable.
+
+    This is especially useful when developing a module in a distributed
+    execution environment: restarting the client Python process with the new
+    source code is enough: there is no need to re-install the new version
+    of the module on all the worker nodes nor to restart the workers.
+
+    Note: this feature is considered experimental. See the cloudpickle
+    README.md file for more details and limitations.
+    """
+    if not isinstance(module, types.ModuleType):
+        raise ValueError(
+            f"Input should be a module object, got {str(module)} instead"
+        )
+    # In the future, cloudpickle may need a way to access any module registered
+    # for pickling by value in order to introspect relative imports inside
+    # functions pickled by value. (see
+    # https://github.com/cloudpipe/cloudpickle/pull/417#issuecomment-873684633).
+    # This access can be ensured by checking that module is present in
+    # sys.modules at registering time and assuming that it will still be in
+    # there when accessed during pickling. Another alternative would be to
+    # store a weakref to the module. Even though cloudpickle does not implement
+    # this introspection yet, in order to avoid a possible breaking change
+    # later, we still enforce the presence of module inside sys.modules.
+    if module.__name__ not in sys.modules:
+        raise ValueError(
+            f"{module} was not imported correctly, have you used an "
+            f"`import` statement to access it?"
+        )
+    _PICKLE_BY_VALUE_MODULES.add(module.__name__)
+
+
+def unregister_pickle_by_value(module):
+    """Unregister that the input module should be pickled by value."""
+    if not isinstance(module, types.ModuleType):
+        raise ValueError(
+            f"Input should be a module object, got {str(module)} instead"
+        )
+    if module.__name__ not in _PICKLE_BY_VALUE_MODULES:
+        raise ValueError(f"{module} is not registered for pickle by value")
+    else:
+        _PICKLE_BY_VALUE_MODULES.remove(module.__name__)
+
+
+def list_registry_pickle_by_value():
+    return _PICKLE_BY_VALUE_MODULES.copy()
+
+
+def _is_registered_pickle_by_value(module):
+    module_name = module.__name__
+    if module_name in _PICKLE_BY_VALUE_MODULES:
+        return True
+    while True:
+        parent_name = module_name.rsplit(".", 1)[0]
+        if parent_name == module_name:
+            break
+        if parent_name in _PICKLE_BY_VALUE_MODULES:
+            return True
+        module_name = parent_name
+    return False
 
 
 def _whichmodule(obj, name):
@@ -170,18 +238,35 @@ def _whichmodule(obj, name):
     return None
 
 
-def _is_importable(obj, name=None):
-    """Dispatcher utility to test the importability of various constructs."""
-    if isinstance(obj, types.FunctionType):
-        return _lookup_module_and_qualname(obj, name=name) is not None
-    elif issubclass(type(obj), type):
-        return _lookup_module_and_qualname(obj, name=name) is not None
+def _should_pickle_by_reference(obj, name=None):
+    """Test whether an function or a class should be pickled by reference
+
+     Pickling by reference means by that the object (typically a function or a
+     class) is an attribute of a module that is assumed to be importable in the
+     target Python environment. Loading will therefore rely on importing the
+     module and then calling `getattr` on it to access the function or class.
+
+     Pickling by reference is the only option to pickle functions and classes
+     in the standard library. In cloudpickle the alternative option is to
+     pickle by value (for instance for interactively or locally defined
+     functions and classes or for attributes of modules that have been
+     explicitly registered to be pickled by value.
+     """
+    if isinstance(obj, types.FunctionType) or issubclass(type(obj), type):
+        module_and_name = _lookup_module_and_qualname(obj, name=name)
+        if module_and_name is None:
+            return False
+        module, name = module_and_name
+        return not _is_registered_pickle_by_value(module)
+
     elif isinstance(obj, types.ModuleType):
         # We assume that sys.modules is primarily used as a cache mechanism for
         # the Python import machinery. Checking if a module has been added in
-        # is sys.modules therefore a cheap and simple heuristic to tell us whether
-        # we can assume  that a given module could be imported by name in
-        # another Python process.
+        # is sys.modules therefore a cheap and simple heuristic to tell us
+        # whether we can assume that a given module could be imported by name
+        # in another Python process.
+        if _is_registered_pickle_by_value(obj):
+            return False
         return obj.__name__ in sys.modules
     else:
         raise TypeError(
@@ -513,43 +598,21 @@ def parametrized_type_hint_getinitargs(obj):
     elif type(obj) is type(ClassVar):
         initargs = (ClassVar, obj.__type__)
     elif type(obj) is type(Generic):
-        parameters = obj.__parameters__
-        if len(obj.__parameters__) > 0:
-            # in early Python 3.5, __parameters__ was sometimes
-            # preferred to __args__
-            initargs = (obj.__origin__, parameters)
-
-        else:
-            initargs = (obj.__origin__, obj.__args__)
+        initargs = (obj.__origin__, obj.__args__)
     elif type(obj) is type(Union):
-        if sys.version_info < (3, 5, 3):  # pragma: no cover
-            initargs = (Union, obj.__union_params__)
-        else:
-            initargs = (Union, obj.__args__)
+        initargs = (Union, obj.__args__)
     elif type(obj) is type(Tuple):
-        if sys.version_info < (3, 5, 3):  # pragma: no cover
-            initargs = (Tuple, obj.__tuple_params__)
-        else:
-            initargs = (Tuple, obj.__args__)
+        initargs = (Tuple, obj.__args__)
     elif type(obj) is type(Callable):
-        if sys.version_info < (3, 5, 3):  # pragma: no cover
-            args = obj.__args__
-            result = obj.__result__
-            if args != Ellipsis:
-                if isinstance(args, tuple):
-                    args = list(args)
-                else:
-                    args = [args]
+        (*args, result) = obj.__args__
+        if len(args) == 1 and args[0] is Ellipsis:
+            args = Ellipsis
         else:
-            (*args, result) = obj.__args__
-            if len(args) == 1 and args[0] is Ellipsis:
-                args = Ellipsis
-            else:
-                args = list(args)
+            args = list(args)
         initargs = (Callable, (args, result))
     else:  # pragma: no cover
         raise pickle.PicklingError(
-            "Cloudpickle Error: Unknown type {}".format(type(obj))
+            f"Cloudpickle Error: Unknown type {type(obj)}"
         )
     return initargs
 
@@ -629,7 +692,7 @@ def instance(cls):
 
 
 @instance
-class _empty_cell_value(object):
+class _empty_cell_value:
     """sentinel for empty closures
     """
     @classmethod
@@ -658,7 +721,7 @@ def _fill_function(*args):
         keys = ['globals', 'defaults', 'dict', 'module', 'closure_values']
         state = dict(zip(keys, args[1:]))
     else:
-        raise ValueError('Unexpected _fill_value arguments: %r' % (args,))
+        raise ValueError(f'Unexpected _fill_value arguments: {args!r}')
 
     # - At pickling time, any dynamic global variable used by func is
     #   serialized by value (in state['globals']).
@@ -826,23 +889,23 @@ def _make_typevar(name, bound, constraints, covariant, contravariant,
 
 
 def _decompose_typevar(obj):
-    try:
-        class_tracker_id = _get_or_create_tracker_id(obj)
-    except TypeError:  # pragma: nocover
-        # TypeVar instances are not weakref-able in Python 3.5.3
-        class_tracker_id = None
     return (
         obj.__name__, obj.__bound__, obj.__constraints__,
         obj.__covariant__, obj.__contravariant__,
-        class_tracker_id,
+        _get_or_create_tracker_id(obj),
     )
 
 
 def _typevar_reduce(obj):
-    # TypeVar instances have no __qualname__ hence we pass the name explicitly.
+    # TypeVar instances require the module information hence why we
+    # are not using the _should_pickle_by_reference directly
     module_and_name = _lookup_module_and_qualname(obj, name=obj.__name__)
+
     if module_and_name is None:
         return (_make_typevar, _decompose_typevar(obj))
+    elif _is_registered_pickle_by_value(module_and_name[0]):
+        return (_make_typevar, _decompose_typevar(obj))
+
     return (getattr, module_and_name)
 
 
