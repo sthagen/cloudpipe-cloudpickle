@@ -244,7 +244,23 @@ def _enum_getstate(obj):
 
 def _code_reduce(obj):
     """codeobject reducer"""
-    if hasattr(obj, "co_linetable"):  # pragma: no branch
+    # If you are not sure about the order of arguments, take a look at help
+    # of the specific type from types, for example:
+    # >>> from types import CodeType
+    # >>> help(CodeType)
+    if hasattr(obj, "co_columntable"):  # pragma: no branch
+        # Python 3.11 and later: there are some new attributes
+        # related to the enhanced exceptions.
+        args = (
+            obj.co_argcount, obj.co_posonlyargcount,
+            obj.co_kwonlyargcount, obj.co_nlocals, obj.co_stacksize,
+            obj.co_flags, obj.co_code, obj.co_consts, obj.co_names,
+            obj.co_varnames, obj.co_filename, obj.co_name, obj.co_qualname,
+            obj.co_firstlineno, obj.co_linetable, obj.co_endlinetable,
+            obj.co_columntable, obj.co_exceptiontable, obj.co_freevars,
+            obj.co_cellvars,
+        )
+    elif hasattr(obj, "co_linetable"):  # pragma: no branch
         # Python 3.10 and later: obj.co_lnotab is deprecated and constructor
         # expects obj.co_linetable instead.
         args = (
@@ -534,6 +550,10 @@ class CloudPickler(Pickler):
     _dispatch_table[type(OrderedDict().keys())] = _odict_keys_reduce
     _dispatch_table[type(OrderedDict().values())] = _odict_values_reduce
     _dispatch_table[type(OrderedDict().items())] = _odict_items_reduce
+    _dispatch_table[abc.abstractmethod] = _classmethod_reduce
+    _dispatch_table[abc.abstractclassmethod] = _classmethod_reduce
+    _dispatch_table[abc.abstractstaticmethod] = _classmethod_reduce
+    _dispatch_table[abc.abstractproperty] = _property_reduce
 
 
     dispatch_table = ChainMap(_dispatch_table, copyreg.dispatch_table)

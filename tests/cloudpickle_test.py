@@ -7,6 +7,7 @@ import io
 import itertools
 import logging
 import math
+import multiprocessing
 from operator import itemgetter, attrgetter
 import pickletools
 import platform
@@ -1089,6 +1090,11 @@ class CloudPickleTest(unittest.TestCase):
                    "'))()")
         assert not subprocess.call([sys.executable, '-c', command])
 
+    def test_multiprocessing_lock_raises(self):
+        lock = multiprocessing.Lock()
+        with pytest.raises(RuntimeError, match="only be shared between processes through inheritance"):
+            cloudpickle.dumps(lock)
+
     def test_cell_manipulation(self):
         cell = _make_empty_cell()
 
@@ -1178,6 +1184,11 @@ class CloudPickleTest(unittest.TestCase):
             def some_staticmethod():
                 """A staticmethod"""
 
+            @property
+            @abc.abstractmethod
+            def some_property():
+                """A property"""
+
         class ConcreteClass(AbstractClass):
             def some_method(self):
                 return 'it works!'
@@ -1189,6 +1200,10 @@ class CloudPickleTest(unittest.TestCase):
 
             @staticmethod
             def some_staticmethod():
+                return 'it works!'
+
+            @property
+            def some_property(self):
                 return 'it works!'
 
         # This abstract class is locally defined so we can safely register
@@ -1212,6 +1227,9 @@ class CloudPickleTest(unittest.TestCase):
 
         self.assertEqual(depickled_class().some_staticmethod(), 'it works!')
         self.assertEqual(depickled_instance.some_staticmethod(), 'it works!')
+
+        self.assertEqual(depickled_class().some_property, 'it works!')
+        self.assertEqual(depickled_instance.some_property, 'it works!')
         self.assertRaises(TypeError, depickled_base)
 
         class DepickledBaseSubclass(depickled_base):
@@ -1225,6 +1243,100 @@ class CloudPickleTest(unittest.TestCase):
 
             @staticmethod
             def some_staticmethod():
+                return 'it works for realz!'
+
+            @property
+            def some_property():
+                return 'it works for realz!'
+
+        self.assertEqual(DepickledBaseSubclass().some_method(),
+                         'it works for realz!')
+
+        class IncompleteBaseSubclass(depickled_base):
+            def some_method(self):
+                return 'this class lacks some concrete methods'
+
+        self.assertRaises(TypeError, IncompleteBaseSubclass)
+
+    def test_abstracts(self):
+        # Same as `test_abc` but using deprecated `abc.abstract*` methods.
+        # See https://github.com/cloudpipe/cloudpickle/issues/367
+
+        class AbstractClass(abc.ABC):
+            @abc.abstractmethod
+            def some_method(self):
+                """A method"""
+
+            @abc.abstractclassmethod
+            def some_classmethod(cls):
+                """A classmethod"""
+
+            @abc.abstractstaticmethod
+            def some_staticmethod():
+                """A staticmethod"""
+
+            @abc.abstractproperty
+            def some_property(self):
+                """A property"""
+
+        class ConcreteClass(AbstractClass):
+            def some_method(self):
+                return 'it works!'
+
+            @classmethod
+            def some_classmethod(cls):
+                assert cls == ConcreteClass
+                return 'it works!'
+
+            @staticmethod
+            def some_staticmethod():
+                return 'it works!'
+
+            @property
+            def some_property(self):
+                return 'it works!'
+
+        # This abstract class is locally defined so we can safely register
+        # tuple in it to verify the unpickled class also register tuple.
+        AbstractClass.register(tuple)
+
+        concrete_instance = ConcreteClass()
+        depickled_base = pickle_depickle(AbstractClass, protocol=self.protocol)
+        depickled_class = pickle_depickle(ConcreteClass,
+                                          protocol=self.protocol)
+        depickled_instance = pickle_depickle(concrete_instance)
+
+        assert issubclass(tuple, AbstractClass)
+        assert issubclass(tuple, depickled_base)
+
+        self.assertEqual(depickled_class().some_method(), 'it works!')
+        self.assertEqual(depickled_instance.some_method(), 'it works!')
+
+        self.assertEqual(depickled_class.some_classmethod(), 'it works!')
+        self.assertEqual(depickled_instance.some_classmethod(), 'it works!')
+
+        self.assertEqual(depickled_class().some_staticmethod(), 'it works!')
+        self.assertEqual(depickled_instance.some_staticmethod(), 'it works!')
+
+        self.assertEqual(depickled_class().some_property, 'it works!')
+        self.assertEqual(depickled_instance.some_property, 'it works!')
+        self.assertRaises(TypeError, depickled_base)
+
+        class DepickledBaseSubclass(depickled_base):
+            def some_method(self):
+                return 'it works for realz!'
+
+            @classmethod
+            def some_classmethod(cls):
+                assert cls == DepickledBaseSubclass
+                return 'it works for realz!'
+
+            @staticmethod
+            def some_staticmethod():
+                return 'it works for realz!'
+
+            @property
+            def some_property(self):
                 return 'it works for realz!'
 
         self.assertEqual(DepickledBaseSubclass().some_method(),
@@ -2223,6 +2335,47 @@ class CloudPickleTest(unittest.TestCase):
             assert check_generic(C[int], C, int, use_args) == "ok"
             assert worker.run(check_generic, C[int], C, int, use_args) == "ok"
 
+    def test_generic_subclass(self):
+        T = typing.TypeVar('T')
+
+        class Base(typing.Generic[T]):
+            pass
+
+        class DerivedAny(Base):
+            pass
+
+        class LeafAny(DerivedAny):
+            pass
+
+        class DerivedInt(Base[int]):
+            pass
+
+        class LeafInt(DerivedInt):
+            pass
+
+        class DerivedT(Base[T]):
+            pass
+
+        class LeafT(DerivedT[T]):
+            pass
+
+        klasses = [
+            Base, DerivedAny, LeafAny, DerivedInt, LeafInt, DerivedT, LeafT
+        ]
+        for klass in klasses:
+            assert pickle_depickle(klass, protocol=self.protocol) is klass
+
+        with subprocess_worker(protocol=self.protocol) as worker:
+
+            def check_mro(klass, expected_mro):
+                assert klass.mro() == expected_mro
+                return "ok"
+
+            for klass in klasses:
+                mro = klass.mro()
+                assert check_mro(klass, mro)
+                assert worker.run(check_mro, klass, mro) == "ok"
+
     def test_locally_defined_class_with_type_hints(self):
         with subprocess_worker(protocol=self.protocol) as worker:
             for type_ in _all_types_to_test():
@@ -2233,29 +2386,13 @@ class CloudPickleTest(unittest.TestCase):
 
                 def check_annotations(obj, expected_type, expected_type_str):
                     assert obj.__annotations__["attribute"] == expected_type
-                    if sys.version_info >= (3, 11):
-                        # In Python 3.11, type annotations are stored as strings.
-                        # See PEP 563 for more details:
-                        # https://www.python.org/dev/peps/pep-0563/
-                        # Originaly scheduled for 3.10, then postponed.
-                        # See this for more details:
-                        # https://mail.python.org/archives/list/python-dev@python.org/thread/CLVXXPQ2T2LQ5MP2Y53VVQFCXYWQJHKZ/
-                        assert (
-                            obj.method.__annotations__["arg"]
-                            == expected_type_str
-                        )
-                        assert (
-                            obj.method.__annotations__["return"]
-                            == expected_type_str
-                        )
-                    else:
-                        assert (
-                            obj.method.__annotations__["arg"] == expected_type
-                        )
-                        assert (
-                            obj.method.__annotations__["return"]
-                            == expected_type
-                        )
+                    assert (
+                        obj.method.__annotations__["arg"] == expected_type
+                    )
+                    assert (
+                        obj.method.__annotations__["return"]
+                        == expected_type
+                    )
                     return "ok"
 
                 obj = MyClass()
