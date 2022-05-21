@@ -1,5 +1,10 @@
-2.1.0 (in development)
+2.2.0 (in development)
 ======================
+
+- TODO document changes here.
+
+2.1.0
+=====
 
 - Support for pickling `abc.abstractproperty`, `abc.abstractclassmethod`,
   and `abc.abstractstaticmethod`.
@@ -10,6 +15,9 @@
 
 - Support and CI configuration for Python 3.11.
   ([PR #467](https://github.com/cloudpipe/cloudpickle/pull/467))
+
+- Support for the experimental `nogil` variant of CPython
+  ([PR #470](https://github.com/cloudpipe/cloudpickle/pull/470))
 
 2.0.0
 =====
