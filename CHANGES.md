@@ -1,9 +1,25 @@
-2.3.0 (development)
-===================
+3.1.0 (in development)
+======================
+
+
+3.0.0
+=====
+
+- Officially support Python 3.12 and drop support for Python 3.6 and 3.7.
+  Dropping support for older Python versions made it possible to simplify the
+  code base signficantly, hopefully making it easier to contribute to and
+  maintain the project.
+  ([PR #515](https://github.com/cloudpipe/cloudpickle/pull/515))
 
 - Fix pickling of dataclasses and their instances.
   ([issue #386](https://github.com/cloudpipe/cloudpickle/issues/386),
    [PR #513](https://github.com/cloudpipe/cloudpickle/pull/513))
+
+- Any color you like as long as it's black.
+  ([PR #521](https://github.com/cloudpipe/cloudpickle/pull/521))
+
+- Drop `setup.py` and `setuptools` in favor of `pyproject.toml` and `flit`.
+  ([PR #521](https://github.com/cloudpipe/cloudpickle/pull/521))
 
 2.2.1
 =====
@@ -134,7 +150,7 @@
 - Fix a bug affecting cloudpickle when non-modules objects are added into
   sys.modules
   ([PR #326](https://github.com/cloudpipe/cloudpickle/pull/326)).
-  
+
 - Fix a regression in cloudpickle and python3.8 causing an error when trying to
   pickle property objects.
   ([PR #329](https://github.com/cloudpipe/cloudpickle/pull/329)).
