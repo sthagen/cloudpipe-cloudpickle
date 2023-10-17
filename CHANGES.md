@@ -7,9 +7,9 @@
 
 - Officially support Python 3.12 and drop support for Python 3.6 and 3.7.
   Dropping support for older Python versions made it possible to simplify the
-  code base signficantly, hopefully making it easier to contribute to and
+  code base significantly, hopefully making it easier to contribute to and
   maintain the project.
-  ([PR #515](https://github.com/cloudpipe/cloudpickle/pull/515))
+  ([PR #517](https://github.com/cloudpipe/cloudpickle/pull/517))
 
 - Fix pickling of dataclasses and their instances.
   ([issue #386](https://github.com/cloudpipe/cloudpickle/issues/386),
